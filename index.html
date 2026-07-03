@@ -1,0 +1,399 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Web Bluetooth Printer - Bản A7</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <style>
+        body { font-family: sans-serif; display: flex; flex-direction: column; align-items: center; padding: 20px; background: #f4f4f9; margin: 0; }
+        .container { width: 100%; max-width: 400px; display: flex; flex-direction: column; gap: 15px; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+        textarea { width: 100%; height: 80px; padding: 10px; border: 1px solid #ccc; border-radius: 4px; resize: vertical; box-sizing: border-box; }
+        button { padding: 12px; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; color: white; transition: background 0.2s; width: 100%; }
+        button:disabled { background: #999 !important; cursor: not-allowed; }
+        #btnConnect { background: #007bff; }
+        #btnPrintText { background: #17a2b8; }
+        #btnPrintFile { background: #28a745; }
+        #status { font-size: 0.9em; color: #555; text-align: center; font-weight: bold; }
+        hr { border: 0; border-top: 1px solid #eee; width: 100%; margin: 5px 0; }
+        .file-section { display: flex; flex-direction: column; gap: 12px; background: #fdfdfd; padding: 15px; border: 1px dashed #ccc; border-radius: 4px; }
+        .input-group { display: flex; gap: 10px; align-items: center; }
+        .input-group label { font-size: 0.9em; color: #333; width: 110px; font-weight: bold; }
+        .input-group input[type="number"], .input-group select { flex: 1; padding: 8px; border: 1px solid #ccc; border-radius: 4px; width: 100%; box-sizing: border-box;}
+        .checkbox-group { display: flex; gap: 8px; align-items: center; font-size: 0.85em; color: #d9534f; font-weight: bold; }
+        .highlight-box { background: #e8f5e9; padding: 12px; border-radius: 6px; border: 1px solid #c8e6c9; font-size: 0.9em; text-align: center; color: #2e7d32; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <button id="btnConnect">Kết nối máy in</button>
+        <div id="status">Chưa kết nối</div>
+
+        <hr>
+        
+        <textarea id="textInput" placeholder="Nhập nội dung cần in nhanh..."></textarea>
+        <button id="btnPrintText">In dữ liệu nhập (TSPL)</button>
+
+        <hr>
+
+        <div class="file-section">
+            <h4 style="margin: 0; color: #333; text-align: center;">In từ File (.txt, .pdf)</h4>
+            
+            <div class="highlight-box">
+                🖨️ Tối ưu độc quyền cho Giấy A7 (76x130mm)<br>
+                <span style="font-size: 0.85em; font-weight: normal; color: #4caf50;">Tự động cắt viền trắng & in tất cả các trang PDF</span>
+            </div>
+
+            <input type="file" id="fileInput" accept=".txt, .pdf" style="font-size: 0.9em; margin-bottom: 5px;">
+            
+            <div class="input-group">
+                <label title="Số lần in lặp lại cho MỖI trang">Bản sao/trang:</label>
+                <input type="number" id="printCopies" value="1" min="1" title="Số lần in lặp lại cho MỖI trang">
+            </div>
+            
+            <div class="checkbox-group" title="Tích vào đây nếu in ra file PDF bị đen xì toàn bộ">
+                <input type="checkbox" id="invertColors">
+                <label for="invertColors">Đảo ngược màu (Sửa lỗi in đen)</label>
+            </div>
+            
+            <button id="btnPrintFile">Thực hiện In File</button>
+        </div>
+    </div>
+
+    <script>
+        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+        let printCharacteristics = [];
+        const delay = ms => new Promise(res => setTimeout(res, ms));
+
+        document.getElementById('btnConnect').addEventListener('click', async () => {
+            const statusEl = document.getElementById('status');
+            statusEl.innerText = 'Đang tìm kiếm...';
+            printCharacteristics = [];
+            
+            try {
+                const device = await navigator.bluetooth.requestDevice({
+                    acceptAllDevices: true,
+                    optionalServices: [
+                        '000018f0-0000-1000-8000-00805f9b34fb', 
+                        'e7810a71-73ae-499d-8c15-faa9aef0c3f2',
+                        '49535343-fe7d-4ae5-8fa9-9fafd205e455',
+                        '0000ff00-0000-1000-8000-00805f9b34fb',
+                        '0000fee7-0000-1000-8000-00805f9b34fb'
+                    ]
+                });
+                
+                statusEl.innerText = 'Đang kết nối...';
+                const server = await device.gatt.connect();
+                
+                const services = await server.getPrimaryServices();
+                if (services.length > 0) {
+                    const knownWriteUUIDs = [
+                        '00002af1-0000-1000-8000-00805f9b34fb',
+                        '0000ff02-0000-1000-8000-00805f9b34fb',
+                        '49535343-8841-43f4-a8d4-ecbe34729bb3',
+                        'bef8d6c9-9c21-4c9e-b632-bd58c1009f9f'
+                    ];
+
+                    let foundChar = null;
+                    for (let service of services) {
+                        const characteristics = await service.getCharacteristics();
+                        
+                        // Bước 1: Quét ưu tiên các UUID in ấn đặc thù
+                        for (let char of characteristics) {
+                            if (knownWriteUUIDs.includes(char.uuid) && (char.properties.write || char.properties.writeWithoutResponse)) {
+                                foundChar = char;
+                                break;
+                            }
+                        }
+                        if (foundChar) break;
+                        
+                        // Bước 2: Quét dự phòng tìm kênh có writeWithoutResponse (kênh truyền dữ liệu)
+                        for (let char of characteristics) {
+                            if (char.properties.writeWithoutResponse) {
+                                foundChar = char;
+                                break;
+                            }
+                        }
+                        if (foundChar) break;
+                    }
+                    
+                    if (foundChar) {
+                        printCharacteristics = [foundChar]; // CHỈ LƯU DUY NHẤT 1 CỔNG
+                        statusEl.innerText = 'Đã kết nối: ' + device.name;
+                    } else {
+                        statusEl.innerText = 'Lỗi: Không tìm thấy kênh ghi chuẩn';
+                    }
+                } else {
+                    statusEl.innerText = 'Lỗi: Không tìm thấy service';
+                }
+            } catch (error) {
+                statusEl.innerText = 'Lỗi kết nối: ' + error.message;
+            }
+        });
+
+        async function sendDataToPrinter(uint8Array, progressPrefix = 'Đang in') {
+            const statusEl = document.getElementById('status');
+            if (printCharacteristics.length === 0) {
+                alert('Vui lòng kết nối máy in trước!');
+                return;
+            }
+            
+            statusEl.innerText = `${progressPrefix}...`;
+            try {
+                // Tối ưu hoá cực hạn: Thử dùng bộ đệm lớn (256 bytes) và delay cực ngắn (5ms) để ép tốc độ x10
+                let chunkSize = 256; 
+                let sleepTime = 5; 
+                
+                for (let char of printCharacteristics) {
+                    let offset = 0;
+                    while (offset < uint8Array.length) {
+                        let end = offset + chunkSize;
+                        if (end > uint8Array.length) {
+                            end = uint8Array.length;
+                        }
+                        let chunk = uint8Array.slice(offset, end);
+                        
+                        let chunkSuccess = false;
+                        let retryCount = 0;
+                        
+                        while (!chunkSuccess && retryCount < 3) {
+                            try {
+                                if (char.properties.writeWithoutResponse) {
+                                    await char.writeValueWithoutResponse(chunk);
+                                } else {
+                                    await char.writeValue(chunk);
+                                }
+                                if (sleepTime > 0) await delay(sleepTime);
+                                chunkSuccess = true;
+                            } catch (e) {
+                                retryCount++;
+                                console.warn(`Lỗi gửi dữ liệu Bluetooth (Lần ${retryCount}). Do MTU giới hạn, tự động giảm tốc...`, e);
+                                
+                                // Nếu máy tính/điện thoại không hỗ trợ cục lớn, rớt về mốc 20 bytes cổ điển
+                                if (chunkSize > 20) {
+                                    chunkSize = 20; 
+                                    sleepTime = 15; // Tăng delay lên một chút để an toàn
+                                    // Tạo lại cục dữ liệu nhỏ hơn để thử lại NGAY LẬP TỨC
+                                    end = offset + chunkSize;
+                                    if (end > uint8Array.length) end = uint8Array.length;
+                                    chunk = uint8Array.slice(offset, end);
+                                    retryCount = 0; 
+                                } else {
+                                    await delay(50); // Chờ mạng xả bớt nghẽn
+                                }
+                            }
+                        }
+                        
+                        if (!chunkSuccess) {
+                            throw new Error("Mất kết nối Bluetooth hoặc máy in từ chối nhận dữ liệu quá nhiều lần.");
+                        }
+                        
+                        offset = end;
+                        
+                        // Cập nhật giao diện mượt mà (không cập nhật quá nhiều lần gây đơ trình duyệt)
+                        if (offset % (chunkSize * 15) < chunkSize || offset === uint8Array.length) {
+                            statusEl.innerText = `${progressPrefix}... ${Math.floor((offset / uint8Array.length) * 100)}%`;
+                        }
+                    }
+                }
+            } catch (error) {
+                statusEl.innerText = 'Lỗi in: ' + error.message;
+                throw error;
+            }
+        }
+
+        // Khóa chết Header TSPL chuẩn cho khổ A7 (76x130mm) có Gap 2mm
+        function getTSPLHeader() {
+            let tsplCmd = 'SIZE 76 mm, 130 mm\r\n';
+            tsplCmd += 'GAP 2 mm, 0 mm\r\n';
+            tsplCmd += 'CLS\r\n';
+            return tsplCmd;
+        }
+
+        document.getElementById('btnPrintText').addEventListener('click', async () => {
+            const text = document.getElementById('textInput').value;
+            let tsplCmd = getTSPLHeader();
+            tsplCmd += 'TEXT 10,10,"TSS24.BF2",0,1,1,"' + text + '"\r\n';
+            tsplCmd += 'PRINT 1\r\n';
+            
+            const encoder = new TextEncoder();
+            try {
+                await sendDataToPrinter(encoder.encode(tsplCmd), 'Đang in Text');
+                document.getElementById('status').innerText = 'In Text hoàn tất!';
+            } catch(e) {}
+        });
+
+        document.getElementById('btnPrintFile').addEventListener('click', async () => {
+            const fileInput = document.getElementById('fileInput');
+            if (fileInput.files.length === 0) {
+                alert('Vui lòng chọn một file (.txt hoặc .pdf)');
+                return;
+            }
+            
+            const file = fileInput.files[0];
+            const copies = document.getElementById('printCopies').value || 1;
+            const invertColors = document.getElementById('invertColors').checked;
+            const statusEl = document.getElementById('status');
+            
+            if (file.name.toLowerCase().endsWith('.txt')) {
+                const reader = new FileReader();
+                reader.onload = async function(e) {
+                    const text = e.target.result;
+                    const lines = text.split(/\r?\n/);
+                    let tsplCmd = getTSPLHeader();
+                    let yOffset = 10;
+                    
+                    for(let i = 0; i < lines.length; i++) {
+                        let line = lines[i].trim();
+                        if(line.length > 0) {
+                            line = line.replace(/"/g, '\\"');
+                            tsplCmd += 'TEXT 10,' + yOffset + ',"TSS24.BF2",0,1,1,"' + line + '"\r\n';
+                            yOffset += 30; 
+                        }
+                    }
+                    tsplCmd += `PRINT ${copies}\r\n`;
+                    const encoder = new TextEncoder();
+                    try {
+                        await sendDataToPrinter(encoder.encode(tsplCmd), 'Đang in file TXT');
+                        statusEl.innerText = 'In file TXT hoàn tất!';
+                    } catch(e) {}
+                };
+                reader.readAsText(file);
+            } else if (file.name.toLowerCase().endsWith('.pdf')) {
+                document.getElementById('btnPrintFile').disabled = true;
+                
+                try {
+                    const arrayBuffer = await file.arrayBuffer();
+                    const pdf = await pdfjsLib.getDocument(arrayBuffer).promise;
+                    const numPages = pdf.numPages;
+                    
+                    for (let pageNum = 1; pageNum <= numPages; pageNum++) {
+                        statusEl.innerText = `Đang phân tích trang ${pageNum}/${numPages}...`;
+                        const page = await pdf.getPage(pageNum);
+                        
+                        // --- BƯỚC 1: Render nháp để định vị vùng chứa nội dung (loại bỏ viền trắng) ---
+                        let viewport = page.getViewport({ scale: 1.0 });
+                        let canvas = document.createElement('canvas');
+                        let context = canvas.getContext('2d');
+                        canvas.width = viewport.width;
+                        canvas.height = viewport.height;
+                        
+                        context.fillStyle = "white";
+                        context.fillRect(0, 0, canvas.width, canvas.height);
+                        await page.render({ canvasContext: context, viewport: viewport }).promise;
+                        
+                        let pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+                        let minX = canvas.width, minY = canvas.height, maxX = 0, maxY = 0;
+                        
+                        for (let y = 0; y < canvas.height; y++) {
+                            for (let x = 0; x < canvas.width; x++) {
+                                let idx = (y * canvas.width + x) * 4;
+                                let r = pixels[idx], g = pixels[idx + 1], b = pixels[idx + 2], a = pixels[idx + 3];
+                                if (a > 128) {
+                                    let luminance = 0.299 * r + 0.587 * g + 0.114 * b;
+                                    if (luminance < 230) { // Ngưỡng nhạy để không bỏ sót viền xám/mờ
+                                        if (x < minX) minX = x;
+                                        if (x > maxX) maxX = x;
+                                        if (y < minY) minY = y;
+                                        if (y > maxY) maxY = y;
+                                    }
+                                }
+                            }
+                        }
+                        
+                        if (minX >= canvas.width) {
+                            console.log(`Trang ${pageNum} trắng hoàn toàn, bỏ qua.`);
+                            continue;
+                        }
+                        
+                        let contentWidth = maxX - minX + 1;
+                        let contentHeight = maxY - minY + 1;
+                        
+                        // --- BƯỚC 2: Tính tỷ lệ Scale để nội dung VỪA KHÍT khổ A7 ---
+                        // Khổ A7 (76mm x 130mm) với máy in 203 DPI (8 dots/mm) = 608 x 1040 dots
+                        const MAX_DOTS_WIDTH = 608;
+                        const MAX_DOTS_HEIGHT = 1040;
+                        
+                        let scaleX = MAX_DOTS_WIDTH / contentWidth;
+                        let scaleY = MAX_DOTS_HEIGHT / contentHeight;
+                        let finalScale = Math.min(scaleX, scaleY); // Ưu tiên giữ đúng tỷ lệ hình ảnh
+                        
+                        // --- BƯỚC 3: Render bản in sắc nét cuối cùng với tỷ lệ phóng vừa khít ---
+                        let finalViewport = page.getViewport({ scale: finalScale });
+                        canvas.width = finalViewport.width;
+                        canvas.height = finalViewport.height;
+                        
+                        context.fillStyle = "white";
+                        context.fillRect(0, 0, canvas.width, canvas.height);
+                        await page.render({ canvasContext: context, viewport: finalViewport }).promise;
+                        
+                        let cropX = Math.floor(minX * finalScale);
+                        let cropY = Math.floor(minY * finalScale);
+                        let cropW = Math.ceil(contentWidth * finalScale);
+                        let cropH = Math.ceil(contentHeight * finalScale);
+                        
+                        if (cropX + cropW > canvas.width) cropW = canvas.width - cropX;
+                        if (cropY + cropH > canvas.height) cropH = canvas.height - cropY;
+                        
+                        let finalPixels = context.getImageData(cropX, cropY, cropW, cropH).data;
+                        
+                        // Căn giữa hình ảnh trên tem 76x130mm
+                        let printX = Math.floor((MAX_DOTS_WIDTH - cropW) / 2);
+                        let printY = Math.floor((MAX_DOTS_HEIGHT - cropH) / 2); 
+                        printX = Math.floor(printX / 8) * 8; // Đảm bảo X là bội số của 8
+                        
+                        const cropWidthBytes = Math.ceil(cropW / 8);
+                        const defaultByte = invertColors ? 0xFF : 0x00;
+                        const bitmapData = new Uint8Array(cropWidthBytes * cropH).fill(defaultByte);
+                        
+                        for (let y = 0; y < cropH; y++) {
+                            for (let x = 0; x < cropW; x++) {
+                                let idx = (y * cropW + x) * 4;
+                                let r = finalPixels[idx], g = finalPixels[idx + 1], b = finalPixels[idx + 2], a = finalPixels[idx + 3];
+                                
+                                let isBlack = false;
+                                if (a > 128) {
+                                    let luminance = 0.299 * r + 0.587 * g + 0.114 * b;
+                                    if (luminance < 128) isBlack = true;
+                                }
+                                
+                                let byteIdx = y * cropWidthBytes + Math.floor(x / 8);
+                                let bitPos = 7 - (x % 8);
+                                
+                                if (invertColors) {
+                                    if (isBlack) bitmapData[byteIdx] &= ~(1 << bitPos);
+                                } else {
+                                    if (isBlack) bitmapData[byteIdx] |= (1 << bitPos);
+                                }
+                            }
+                        }
+                        
+                        const encoder = new TextEncoder();
+                        const header = getTSPLHeader() + `BITMAP ${printX},${printY},${cropWidthBytes},${cropH},0,`;
+                        const footer = `\r\nPRINT ${copies}\r\n`;
+                        
+                        const headerBytes = encoder.encode(header);
+                        const footerBytes = encoder.encode(footer);
+                        
+                        const printData = new Uint8Array(headerBytes.length + bitmapData.length + footerBytes.length);
+                        printData.set(headerBytes, 0);
+                        printData.set(bitmapData, headerBytes.length);
+                        printData.set(footerBytes, headerBytes.length + bitmapData.length);
+                        
+                        await sendDataToPrinter(printData, `Đang in trang ${pageNum}/${numPages}`);
+                    }
+                    
+                    statusEl.innerText = `Đã in hoàn tất ${numPages} trang PDF!`;
+                } catch (err) {
+                    statusEl.innerText = 'Lỗi xử lý PDF: ' + err.message;
+                } finally {
+                    document.getElementById('btnPrintFile').disabled = false;
+                }
+            } else {
+                alert('Chỉ hỗ trợ file .txt hoặc .pdf');
+            }
+        });
+    </script>
+</body>
+</html>

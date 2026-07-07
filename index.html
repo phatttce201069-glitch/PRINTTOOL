@@ -377,59 +377,69 @@
                         const encoder = new TextEncoder();
                         let payloadBuffers = [encoder.encode(getTSPLHeader())];
                         
-                        // Sửa lỗi in chồng chéo/mất khúc (Display List Overflow): 
-                        // Các máy in giá rẻ chỉ chịu được tối đa 20-30 lệnh BITMAP mỗi trang.
-                        // Thuật toán gộp khối: Chỉ bỏ qua khoảng trắng nếu nó đủ lớn (>= 24 dòng), 
-                        // ngược lại sẽ gộp chung vào 1 lệnh BITMAP để giảm thiểu số lượng lệnh gửi đi.
-                        let inBlock = false;
-                        let blockStartY = 0;
-                        let emptyRowCount = 0;
-                        const EMPTY_ROW_THRESHOLD = 24; 
-                        let blocks = [];
+                        // Hàm nén ảnh sang định dạng PCX (RLE 1-bit monochrome) siêu nhẹ
+                        function encodePCXRLE(data, w, h) {
+                            let bytesPerLine = Math.ceil(w / 8);
+                            if (bytesPerLine % 2 !== 0) bytesPerLine++; // PCX chuẩn yêu cầu chẵn
+                            let encoded = [];
+                            for (let y = 0; y < h; y++) {
+                                let rowStart = y * Math.ceil(w / 8);
+                                for (let x = 0; x < bytesPerLine; x++) {
+                                    let byteVal = x < Math.ceil(w / 8) ? data[rowStart + x] : 0;
+                                    byteVal = (~byteVal) & 0xFF; // Invert: 0 là đen, 1 là trắng
 
-                        for (let y = 0; y < cropH; y++) {
-                            let isRowEmpty = true;
-                            for (let x = 0; x < cropWidthBytes; x++) {
-                                if (bitmapData[y * cropWidthBytes + x] !== defaultByte) {
-                                    isRowEmpty = false;
-                                    break;
-                                }
-                            }
-                            
-                            if (!isRowEmpty) {
-                                if (!inBlock) {
-                                    inBlock = true;
-                                    blockStartY = y;
-                                }
-                                emptyRowCount = 0;
-                            } else {
-                                if (inBlock) {
-                                    emptyRowCount++;
-                                    if (emptyRowCount >= EMPTY_ROW_THRESHOLD) {
-                                        inBlock = false;
-                                        let blockHeight = (y - emptyRowCount) - blockStartY + 1;
-                                        blocks.push({y: blockStartY, h: blockHeight});
+                                    let runCount = 1;
+                                    while (x + 1 < bytesPerLine && runCount < 63) {
+                                        let nextVal = (x + 1) < Math.ceil(w / 8) ? data[rowStart + x + 1] : 0;
+                                        nextVal = (~nextVal) & 0xFF;
+                                        if (nextVal !== byteVal) break;
+                                        runCount++;
+                                        x++;
+                                    }
+                                    if (runCount > 1 || (byteVal & 0xC0) === 0xC0) {
+                                        encoded.push(0xC0 | runCount);
+                                        encoded.push(byteVal);
+                                    } else {
+                                        encoded.push(byteVal);
                                     }
                                 }
                             }
+                            
+                            let header = new Uint8Array(128);
+                            header.fill(0);
+                            header[0] = 10; header[1] = 5; header[2] = 1; header[3] = 1;
+                            header[8] = (w - 1) & 0xFF; header[9] = ((w - 1) >> 8) & 0xFF;
+                            header[10] = (h - 1) & 0xFF; header[11] = ((h - 1) >> 8) & 0xFF;
+                            header[12] = 203; header[13] = 0; header[14] = 203; header[15] = 0;
+                            header[16] = 0; header[17] = 0; header[18] = 0;
+                            header[19] = 255; header[20] = 255; header[21] = 255;
+                            header[65] = 1;
+                            header[66] = bytesPerLine & 0xFF; header[67] = (bytesPerLine >> 8) & 0xFF;
+                            header[68] = 1;
+
+                            let buf = new Uint8Array(128 + encoded.length);
+                            buf.set(header, 0);
+                            buf.set(new Uint8Array(encoded), 128);
+                            return buf;
                         }
+
+                        // Nén toàn bộ trang hiện tại thành 1 file PCX duy nhất
+                        let pcxBuffer = encodePCXRLE(bitmapData, cropW, cropH);
+                        console.log(`Page ${pageNum} PCX Size: ${pcxBuffer.length} bytes (Original: ${bitmapData.length} bytes)`);
+
+                        // 1. Tải file PCX vào bộ nhớ máy in
+                        payloadBuffers.push(encoder.encode(`DOWNLOAD "F.PCX",${pcxBuffer.length},`));
+                        payloadBuffers.push(pcxBuffer);
+                        payloadBuffers.push(encoder.encode('\r\n'));
+
+                        // 2. Vẽ file PCX ra vùng đệm trang in
+                        payloadBuffers.push(encoder.encode(`PUTPCX ${printX},${printY},"F.PCX"\r\n`));
                         
-                        if (inBlock) {
-                            let blockHeight = (cropH - 1 - emptyRowCount) - blockStartY + 1;
-                            if (blockHeight > 0) {
-                                blocks.push({y: blockStartY, h: blockHeight});
-                            }
-                        }
-                        
-                        // Xuất các khối dữ liệu đã gộp
-                        for (let block of blocks) {
-                            let cmd = `BITMAP ${printX},${printY + block.y},${cropWidthBytes},${block.h},0,`;
-                            payloadBuffers.push(encoder.encode(cmd));
-                            payloadBuffers.push(bitmapData.slice(block.y * cropWidthBytes, (block.y + block.h) * cropWidthBytes));
-                            payloadBuffers.push(encoder.encode('\r\n'));
-                        }
-                        
+                        // 3. Thực thi in
                         payloadBuffers.push(encoder.encode(`PRINT ${copies}\r\n`));
+                        
+                        // 4. Xóa file PCX khỏi bộ nhớ để dọn dẹp
+                        payloadBuffers.push(encoder.encode(`KILL "F.PCX"\r\n`));
                         
                         let totalLength = payloadBuffers.reduce((acc, val) => acc + val.length, 0);
                         let printData = new Uint8Array(totalLength);

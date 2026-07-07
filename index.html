@@ -398,10 +398,19 @@
                                 if (inBlock) {
                                     inBlock = false; // Kết thúc đoạn có mực
                                     let blockHeight = y - blockStartY;
-                                    let cmd = `BITMAP ${printX},${printY + blockStartY},${cropWidthBytes},${blockHeight},0,`;
-                                    payloadBuffers.push(encoder.encode(cmd));
-                                    payloadBuffers.push(bitmapData.slice(blockStartY * cropWidthBytes, y * cropWidthBytes));
-                                    payloadBuffers.push(encoder.encode('\r\n'));
+                                    
+                                    // Chống Timeout máy in: Cắt nhỏ khối hình ảnh thành các dải ngang mỏng (16 dòng/dải)
+                                    // Máy in sẽ nhận từng dải nhỏ và xử lý ngay lập tức, không bao giờ bị Timeout gây ra trang trắng
+                                    let maxRows = 16;
+                                    for (let r = 0; r < blockHeight; r += maxRows) {
+                                        let h = Math.min(maxRows, blockHeight - r);
+                                        let sy = blockStartY + r;
+                                        let slice = bitmapData.slice(sy * cropWidthBytes, (sy + h) * cropWidthBytes);
+                                        let cmd = `BITMAP ${printX},${printY + sy},${cropWidthBytes},${h},0,`;
+                                        payloadBuffers.push(encoder.encode(cmd));
+                                        payloadBuffers.push(slice);
+                                        payloadBuffers.push(encoder.encode('\r\n'));
+                                    }
                                 }
                             }
                         }
@@ -409,10 +418,16 @@
                         // Xử lý đoạn cuối cùng nếu có
                         if (inBlock) {
                             let blockHeight = cropH - blockStartY;
-                            let cmd = `BITMAP ${printX},${printY + blockStartY},${cropWidthBytes},${blockHeight},0,`;
-                            payloadBuffers.push(encoder.encode(cmd));
-                            payloadBuffers.push(bitmapData.slice(blockStartY * cropWidthBytes, cropH * cropWidthBytes));
-                            payloadBuffers.push(encoder.encode('\r\n'));
+                            let maxRows = 16;
+                            for (let r = 0; r < blockHeight; r += maxRows) {
+                                let h = Math.min(maxRows, blockHeight - r);
+                                let sy = blockStartY + r;
+                                let slice = bitmapData.slice(sy * cropWidthBytes, (sy + h) * cropWidthBytes);
+                                let cmd = `BITMAP ${printX},${printY + sy},${cropWidthBytes},${h},0,`;
+                                payloadBuffers.push(encoder.encode(cmd));
+                                payloadBuffers.push(slice);
+                                payloadBuffers.push(encoder.encode('\r\n'));
+                            }
                         }
                         
                         payloadBuffers.push(encoder.encode(`PRINT ${copies}\r\n`));

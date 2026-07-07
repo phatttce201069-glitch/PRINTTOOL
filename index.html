@@ -141,9 +141,13 @@
             
             statusEl.innerText = `${progressPrefix}...`;
             try {
-                // Tối ưu hoá cực hạn: Thử dùng bộ đệm lớn (256 bytes) và delay cực ngắn (5ms) để ép tốc độ x10
-                let chunkSize = 256; 
-                let sleepTime = 5; 
+                // Tự động nhận diện thiết bị
+                const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+                
+                // Điện thoại bắt buộc truyền cực chậm (20 bytes) để tránh bị hệ điều hành "nuốt" mất gói tin gây ra trang trắng.
+                // PC có băng thông tốt nên ép xung tốc độ x10 (256 bytes)
+                let chunkSize = isMobile ? 20 : 256; 
+                let sleepTime = isMobile ? 20 : 5; 
                 
                 for (let char of printCharacteristics) {
                     let offset = 0;
@@ -370,16 +374,56 @@
                         }
                         
                         const encoder = new TextEncoder();
-                        const header = getTSPLHeader() + `BITMAP ${printX},${printY},${cropWidthBytes},${cropH},0,`;
-                        const footer = `\r\nPRINT ${copies}\r\n`;
+                        let payloadBuffers = [encoder.encode(getTSPLHeader())];
                         
-                        const headerBytes = encoder.encode(header);
-                        const footerBytes = encoder.encode(footer);
+                        let inBlock = false;
+                        let blockStartY = 0;
                         
-                        const printData = new Uint8Array(headerBytes.length + bitmapData.length + footerBytes.length);
-                        printData.set(headerBytes, 0);
-                        printData.set(bitmapData, headerBytes.length);
-                        printData.set(footerBytes, headerBytes.length + bitmapData.length);
+                        // Quét từng dòng ngang (row) để nén: Bỏ qua hoàn toàn các dòng trắng (không có mực)
+                        for (let y = 0; y < cropH; y++) {
+                            let isRowEmpty = true;
+                            for (let x = 0; x < cropWidthBytes; x++) {
+                                if (bitmapData[y * cropWidthBytes + x] !== defaultByte) {
+                                    isRowEmpty = false;
+                                    break;
+                                }
+                            }
+                            
+                            if (!isRowEmpty) {
+                                if (!inBlock) {
+                                    inBlock = true;
+                                    blockStartY = y; // Bắt đầu đoạn có mực
+                                }
+                            } else {
+                                if (inBlock) {
+                                    inBlock = false; // Kết thúc đoạn có mực
+                                    let blockHeight = y - blockStartY;
+                                    let cmd = `BITMAP ${printX},${printY + blockStartY},${cropWidthBytes},${blockHeight},0,`;
+                                    payloadBuffers.push(encoder.encode(cmd));
+                                    payloadBuffers.push(bitmapData.slice(blockStartY * cropWidthBytes, y * cropWidthBytes));
+                                    payloadBuffers.push(encoder.encode('\r\n'));
+                                }
+                            }
+                        }
+                        
+                        // Xử lý đoạn cuối cùng nếu có
+                        if (inBlock) {
+                            let blockHeight = cropH - blockStartY;
+                            let cmd = `BITMAP ${printX},${printY + blockStartY},${cropWidthBytes},${blockHeight},0,`;
+                            payloadBuffers.push(encoder.encode(cmd));
+                            payloadBuffers.push(bitmapData.slice(blockStartY * cropWidthBytes, cropH * cropWidthBytes));
+                            payloadBuffers.push(encoder.encode('\r\n'));
+                        }
+                        
+                        payloadBuffers.push(encoder.encode(`PRINT ${copies}\r\n`));
+                        
+                        let totalLength = payloadBuffers.reduce((acc, val) => acc + val.length, 0);
+                        let printData = new Uint8Array(totalLength);
+                        let ptr = 0;
+                        for (let buf of payloadBuffers) {
+                            printData.set(buf, ptr);
+                            ptr += buf.length;
+                        }
                         
                         await sendDataToPrinter(printData, `Đang in trang ${pageNum}/${numPages}`);
                     }

@@ -144,10 +144,11 @@
                 // Tự động nhận diện thiết bị
                 const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
                 
-                // Điện thoại bắt buộc truyền cực chậm (20 bytes) để tránh bị hệ điều hành "nuốt" mất gói tin gây ra trang trắng.
+                // Điện thoại bắt buộc truyền cực chậm (20 bytes / 40ms) để tránh rớt gói tin.
+                // Rớt gói tin sẽ làm mã vạch bị lệch thành đường chéo hoặc nhiễu hột trắng đen.
                 // PC có băng thông tốt nên ép xung tốc độ x10 (256 bytes)
                 let chunkSize = isMobile ? 20 : 256; 
-                let sleepTime = isMobile ? 20 : 5; 
+                let sleepTime = isMobile ? 40 : 5; 
                 
                 for (let char of printCharacteristics) {
                     let offset = 0;

@@ -423,23 +423,72 @@
                             return buf;
                         }
 
-                        // Nén toàn bộ trang hiện tại thành 1 file PCX duy nhất
-                        let pcxBuffer = encodePCXRLE(bitmapData, cropW, cropH);
-                        console.log(`Page ${pageNum} PCX Size: ${pcxBuffer.length} bytes (Original: ${bitmapData.length} bytes)`);
+                        if (isMobile) {
+                            // Điện thoại: Băng thông Bluetooth rất yếu, bắt buộc dùng PCX để nén 80% dung lượng.
+                            // Việc ghi file PCX vào máy in diễn ra đủ chậm để không gây quá tải buffer.
+                            let pcxBuffer = encodePCXRLE(bitmapData, cropW, cropH);
+                            console.log(`Mobile Mode: Page ${pageNum} PCX Size: ${pcxBuffer.length} bytes`);
 
-                        // 1. Tải file PCX vào bộ nhớ máy in
-                        payloadBuffers.push(encoder.encode(`DOWNLOAD "F.PCX",${pcxBuffer.length},`));
-                        payloadBuffers.push(pcxBuffer);
-                        payloadBuffers.push(encoder.encode('\r\n'));
+                            payloadBuffers.push(encoder.encode(`DOWNLOAD "F.PCX",${pcxBuffer.length},`));
+                            payloadBuffers.push(pcxBuffer);
+                            payloadBuffers.push(encoder.encode('\r\n'));
+                            payloadBuffers.push(encoder.encode(`PUTPCX ${printX},${printY},"F.PCX"\r\n`));
+                            payloadBuffers.push(encoder.encode(`PRINT ${copies}\r\n`));
+                            payloadBuffers.push(encoder.encode(`KILL "F.PCX"\r\n`));
+                        } else {
+                            // Máy tính: Băng thông Bluetooth rất mạnh. Nếu gửi file PCX quá nhanh, máy in không kịp 
+                            // ghi vào bộ nhớ Flash dẫn đến tràn buffer và treo máy in. 
+                            // Giải pháp: Dùng lệnh BITMAP thô kết hợp thuật toán Gộp Khối. Lệnh BITMAP ghi thẳng 
+                            // vào RAM siêu tốc của máy in, hoàn toàn không bị nghẽn dù tốc độ truyền cực cao.
+                            console.log(`PC Mode: Page ${pageNum} using BITMAP Smart Grouping`);
+                            let inBlock = false;
+                            let blockStartY = 0;
+                            let emptyRowCount = 0;
+                            const EMPTY_ROW_THRESHOLD = 24; 
+                            let blocks = [];
 
-                        // 2. Vẽ file PCX ra vùng đệm trang in
-                        payloadBuffers.push(encoder.encode(`PUTPCX ${printX},${printY},"F.PCX"\r\n`));
-                        
-                        // 3. Thực thi in
-                        payloadBuffers.push(encoder.encode(`PRINT ${copies}\r\n`));
-                        
-                        // 4. Xóa file PCX khỏi bộ nhớ để dọn dẹp
-                        payloadBuffers.push(encoder.encode(`KILL "F.PCX"\r\n`));
+                            for (let y = 0; y < cropH; y++) {
+                                let isRowEmpty = true;
+                                for (let x = 0; x < cropWidthBytes; x++) {
+                                    if (bitmapData[y * cropWidthBytes + x] !== defaultByte) {
+                                        isRowEmpty = false;
+                                        break;
+                                    }
+                                }
+                                
+                                if (!isRowEmpty) {
+                                    if (!inBlock) {
+                                        inBlock = true;
+                                        blockStartY = y;
+                                    }
+                                    emptyRowCount = 0;
+                                } else {
+                                    if (inBlock) {
+                                        emptyRowCount++;
+                                        if (emptyRowCount >= EMPTY_ROW_THRESHOLD) {
+                                            inBlock = false;
+                                            let blockHeight = (y - emptyRowCount) - blockStartY + 1;
+                                            blocks.push({y: blockStartY, h: blockHeight});
+                                        }
+                                    }
+                                }
+                            }
+                            
+                            if (inBlock) {
+                                let blockHeight = (cropH - 1 - emptyRowCount) - blockStartY + 1;
+                                if (blockHeight > 0) {
+                                    blocks.push({y: blockStartY, h: blockHeight});
+                                }
+                            }
+                            
+                            for (let block of blocks) {
+                                let cmd = `BITMAP ${printX},${printY + block.y},${cropWidthBytes},${block.h},0,`;
+                                payloadBuffers.push(encoder.encode(cmd));
+                                payloadBuffers.push(bitmapData.slice(block.y * cropWidthBytes, (block.y + block.h) * cropWidthBytes));
+                                payloadBuffers.push(encoder.encode('\r\n'));
+                            }
+                            payloadBuffers.push(encoder.encode(`PRINT ${copies}\r\n`));
+                        }
                         
                         let totalLength = payloadBuffers.reduce((acc, val) => acc + val.length, 0);
                         let printData = new Uint8Array(totalLength);
